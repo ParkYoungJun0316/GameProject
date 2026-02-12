@@ -1,0 +1,152 @@
+using UnityEngine;
+
+
+public class PlayerStealth : MonoBehaviour
+{
+
+    public Renderer[] localRenderers;
+    public Renderer[] worldRenderers;
+
+
+    public LayerMask groundMask;
+    public float groundCheckDistance = 1.5f;
+    public float rayOriginUp = 0.5f;
+
+    [Header("Alpha Control")]
+    public float localMinAlpha = 0.45f;
+    public float worldMinAlpha = 0.00f;
+
+
+    public bool isStealth;
+    public FloorTile.ColorType groundType;
+
+    private Player player;
+    private MaterialPropertyBlock mpb;
+    private int layerPlayer;
+    private int layerPlayerStealth;
+    private int desiredLayer = -1;
+
+    static readonly int BaseColorId = Shader.PropertyToID("_BaseColor");
+    static readonly int ColorId = Shader.PropertyToID("_Color");
+
+    void Awake()
+    {
+        player = GetComponent<Player>();
+        mpb = new MaterialPropertyBlock();
+
+        // Retrieve layer indices by name to ensure project compatibility.[10]
+        layerPlayer = LayerMask.NameToLayer("Player");
+        layerPlayerStealth = LayerMask.NameToLayer("PlayerStealth");
+
+        if (layerPlayer == -1 || layerPlayerStealth == -1)
+        {
+            Debug.LogError(" 'Player' or 'PlayerStealth' layer is missing in Project Settings.");
+        }
+
+        // Initialize ground mask if not set in inspector.
+        if (groundMask.value == 0) groundMask = LayerMask.GetMask("Ground", "Floor");
+    }
+
+    void Update()
+    {
+        if (player == null || player.IsDead)
+        {
+            isStealth = false;
+            UpdateVisuals(0f);
+            return;
+        }
+
+        // Sampling logic with robust component retrieval.
+        bool hasTile = SampleGroundType(out groundType);
+
+        // Evaluate logic: color parity results in stealth state.
+        bool isColorMatched = false;
+        if (hasTile)
+        {
+            // Only Black or White tiles support stealth; Reveal (Green) does not.
+            if (player.isBlack && groundType == FloorTile.ColorType.Black) isColorMatched = true;
+            else if (!player.isBlack && groundType == FloorTile.ColorType.White) isColorMatched = true;
+        }
+
+        isStealth = isColorMatched;
+
+        // Visual Alpha Interpolation.
+        float stealthWeight = isStealth ? 1f : 0f;
+        UpdateVisuals(stealthWeight);
+
+        // Update target layer based on stealth state.
+        desiredLayer = isStealth ? layerPlayerStealth : layerPlayer;
+    }
+
+    void LateUpdate()
+    {
+        // Prevent stealth logic from overriding Death/Respawn layers.
+        if (player != null && player.IsDead) return;
+        if (desiredLayer == -1) return;
+
+        // Apply layer changes only when state shifts to optimize performance.
+        if (gameObject.layer != desiredLayer)
+        {
+            SetLayerRecursively(gameObject, desiredLayer);
+            Debug.Log($" Layer shifted to: {LayerMask.LayerToName(desiredLayer)}");
+        }
+    }
+
+    bool SampleGroundType(out FloorTile.ColorType type)
+    {
+        type = default;
+        Vector3 origin = transform.position + Vector3.up * rayOriginUp;
+
+        // Use QueryTriggerInteraction.Collide to support trigger-based floor logic.
+        if (Physics.Raycast(origin, Vector3.down, out RaycastHit hit, groundCheckDistance, groundMask, QueryTriggerInteraction.Collide))
+        {
+            // FIX: Search parent hierarchy for the script if the ray hits a child collider.
+            var tile = hit.collider.GetComponentInParent<FloorTile>();
+            if (tile != null)
+            {
+                type = tile.type;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void UpdateVisuals(float t)
+    {
+        ApplyAlpha(localRenderers, Mathf.Lerp(1f, localMinAlpha, t));
+        ApplyAlpha(worldRenderers, Mathf.Lerp(1f, worldMinAlpha, t));
+    }
+
+    void ApplyAlpha(Renderer[] renderers, float a)
+    {
+        if (renderers == null) return;
+        for (int i = 0; i < renderers.Length; i++)
+        {
+            var r = renderers[i];
+            if (r == null) continue;
+
+            r.GetPropertyBlock(mpb);
+
+            // Maintain the base color established by PlayerVisualController.
+            Color currentC = mpb.GetColor(BaseColorId);
+
+            // Fallback for initial frames before VisualController initializes.
+            if (currentC.a == 0 && currentC.r == 0 && currentC.g == 0 && currentC.b == 0)
+                currentC = player.isBlack ? Color.black : Color.white;
+
+            currentC.a = a;
+            mpb.SetColor(BaseColorId, currentC);
+            mpb.SetColor(ColorId, currentC);
+            r.SetPropertyBlock(mpb);
+        }
+    }
+
+    void SetLayerRecursively(GameObject obj, int layer)
+    {
+        obj.layer = layer;
+        foreach (Transform child in obj.transform)
+        {
+            SetLayerRecursively(child.gameObject, layer);
+        }
+    }
+}
